@@ -103,6 +103,13 @@ TlsTransportStatus_t xTlsDisconnect( NetworkContext_t* pxNetworkContext )
 int32_t espTlsTransportSend( NetworkContext_t* pxNetworkContext,
                              const void* pvData, size_t uxDataLen)
 {
+
+    int lSockFd = -1;
+    fd_set write_fds;
+    fd_set errorSet;
+
+    struct timeval timeout = { .tv_usec = 10000, .tv_sec = 0 };
+
     int32_t lBytesSent = -1;
 
     if( ( pvData != NULL ) &&
@@ -120,6 +127,14 @@ int32_t espTlsTransportSend( NetworkContext_t* pxNetworkContext,
             lBytesSent = 0;
             do
             {
+                FD_ZERO(&write_fds);
+                FD_SET(lSockFd, &write_fds);
+
+                FD_ZERO(&errorSet);
+                FD_SET(lSockFd, &errorSet);
+
+                select(lSockFd + 1, NULL, &write_fds, &errorSet, &timeout);
+
                 ssize_t lResult = esp_tls_conn_write(pxNetworkContext->pxTls, pvData, uxDataLen);
 
                 if( lResult > 0 )
@@ -137,7 +152,7 @@ int32_t espTlsTransportSend( NetworkContext_t* pxNetworkContext,
                 {
                     break;
                 }
-                vTaskDelay( 1 );
+
             }
             while( xTaskCheckForTimeOut( &xTimeout, &xTicksToWait ) == pdFALSE );
 
