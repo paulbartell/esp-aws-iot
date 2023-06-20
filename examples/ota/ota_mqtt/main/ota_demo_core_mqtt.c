@@ -67,17 +67,18 @@
 /* Include firmware version struct definition. */
 #include "ota_appversion32.h"
 
-#ifndef ROOT_CA_CERT_PATH
-    extern const char root_cert_auth_pem_start[]   asm("_binary_root_cert_auth_pem_start");
-    extern const char root_cert_auth_pem_end[]   asm("_binary_root_cert_auth_pem_end");
+#ifdef CONFIG_EXAMPLE_USE_ESP_SECURE_CERT_MGR
+    #include "esp_secure_cert_read.h"    
 #endif
-#ifndef CLIENT_CERT_PATH
-    extern const char client_cert_pem_start[] asm("_binary_client_crt_start");
-    extern const char client_cert_pem_end[] asm("_binary_client_crt_end");
-#endif
-#ifndef CLIENT_PRIVATE_KEY_PATH
-    extern const char client_key_pem_start[] asm("_binary_client_key_start");
-    extern const char client_key_pem_end[] asm("_binary_client_key_end");
+
+extern const char root_cert_auth_start[]   asm("_binary_root_cert_auth_crt_start");
+extern const char root_cert_auth_end[]   asm("_binary_root_cert_auth_crt_end");
+    
+#ifndef CONFIG_EXAMPLE_USE_ESP_SECURE_CERT_MGR
+    extern const char client_cert_start[] asm("_binary_client_crt_start");
+    extern const char client_cert_end[] asm("_binary_client_crt_end");
+    extern const char client_key_start[] asm("_binary_client_key_start");
+    extern const char client_key_end[] asm("_binary_client_key_end");
 #endif
 
 extern const char pcAwsCodeSigningCertPem[] asm("_binary_aws_codesign_crt_start");
@@ -904,7 +905,7 @@ static int initializeMqtt( MQTTContext_t * pMqttContext,
     int returnStatus = EXIT_SUCCESS;
     MQTTStatus_t mqttStatus = MQTTBadParameter;
     MQTTFixedBuffer_t networkBuffer;
-    TransportInterface_t transport;
+    TransportInterface_t transport = { 0 };
 
     assert( pMqttContext != NULL );
     assert( pNetworkContext != NULL );
@@ -970,26 +971,39 @@ static int connectToServerWithBackoffRetries( NetworkContext_t * pNetworkContext
     uint16_t nextRetryBackOff;
 
     /* Initialize credentials for establishing TLS session. */
-    pNetworkContext->pcServerRootCAPem = root_cert_auth_pem_start;
+    pNetworkContext->pcServerRootCA = root_cert_auth_start;
+    pNetworkContext->pcServerRootCASize = root_cert_auth_end - root_cert_auth_start;
 
 #ifdef CONFIG_EXAMPLE_USE_SECURE_ELEMENT
-    pNetworkContext->pcClientCertPem = NULL;
-    pNetworkContext->pcClientKeyPem = NULL;
     pNetworkContext->use_secure_element = true;
-#elif CONFIG_EXAMPLE_USE_DS_PERIPHERAL
-    pNetworkContext->pcClientCertPem = client_cert_pem_start;
-    pNetworkContext->pcClientKeyPem = NULL;
-#error "Populate the ds_data structure and remove this line"
-    /* pNetworkContext->ds_data = DS_DATA; */
-    /* The ds_data can be populated using the API's provided by esp_secure_cert_mgr */
-#else
-    /* If #CLIENT_USERNAME is defined, username/password is used for authenticating
-     * the client. */
+
+#elif defined(CONFIG_EXAMPLE_USE_ESP_SECURE_CERT_MGR)
+    if (esp_secure_cert_get_device_cert(&pNetworkContext->pcClientCert, &pNetworkContext->pcClientCertSize) != ESP_OK) {
+        LogError( ( "Failed to obtain flash address of device cert") );
+        return EXIT_FAILURE;
+    }
+#ifdef CONFIG_ESP_SECURE_CERT_DS_PERIPHERAL
+    pNetworkContext->ds_data = esp_secure_cert_get_ds_ctx();
+    if (pNetworkContext->ds_data == NULL) {
+        LogError( ( "Failed to obtain the ds context") );
+        return EXIT_FAILURE;
+    }
+#else /* !CONFIG_ESP_SECURE_CERT_DS_PERIPHERAL */
+    if (esp_secure_cert_get_priv_key(&pNetworkContext->pcClientKey, &pNetworkContext->pcClientKeySize) != ESP_OK) {
+        LogError( ( "Failed to obtain flash address of private_key") );
+        return EXIT_FAILURE;
+    }
+#endif /* CONFIG_ESP_SECURE_CERT_DS_PERIPHERAL */
+
+#else /* !CONFIG_EXAMPLE_USE_SECURE_ELEMENT && !CONFIG_EXAMPLE_USE_ESP_SECURE_CERT_MGR  */
     #ifndef CLIENT_USERNAME
-        pNetworkContext->pcClientCertPem = client_cert_pem_start;
-        pNetworkContext->pcClientKeyPem = client_key_pem_start;
+        pNetworkContext->pcClientCert = client_cert_start;
+        pNetworkContext->pcClientCertSize = client_cert_end - client_cert_start;
+        pNetworkContext->pcClientKey = client_key_start;
+        pNetworkContext->pcClientKeySize = client_key_end - client_key_start;
     #endif
 #endif
+
     /* AWS IoT requires devices to send the Server Name Indication (SNI)
      * extension to the Transport Layer Security (TLS) protocol and provide
      * the complete endpoint address in the host_name field. Details about
@@ -1209,6 +1223,26 @@ static int establishConnection( void )
 
 /*-----------------------------------------------------------*/
 
+static void cleanupESPSecureMgrCerts( NetworkContext_t * pNetworkContext )
+{
+#ifdef CONFIG_EXAMPLE_USE_SECURE_ELEMENT
+    /* Nothing to be freed */
+#elif defined(CONFIG_EXAMPLE_USE_ESP_SECURE_CERT_MGR)
+    esp_secure_cert_free_device_cert(&pNetworkContext->pcClientCert);
+#ifdef CONFIG_ESP_SECURE_CERT_DS_PERIPHERAL
+    esp_secure_cert_free_ds_ctx(pNetworkContext->ds_data);
+#else /* !CONFIG_ESP_SECURE_CERT_DS_PERIPHERAL */
+    esp_secure_cert_free_priv_key(&pNetworkContext->pcClientKey);
+#endif /* CONFIG_ESP_SECURE_CERT_DS_PERIPHERAL */
+
+#else /* !CONFIG_EXAMPLE_USE_SECURE_ELEMENT && !CONFIG_EXAMPLE_USE_ESP_SECURE_CERT_MGR  */
+    /* Nothing to be freed */
+#endif
+    return;
+}
+
+/*-----------------------------------------------------------*/
+
 static void disconnect( void )
 {
     /* Disconnect from broker. */
@@ -1239,6 +1273,7 @@ static void disconnect( void )
     }
 
     /* End TLS session, then close TCP connection. */
+    cleanupESPSecureMgrCerts( &networkContext );
     ( void ) xTlsDisconnect( &networkContext );
 }
 
